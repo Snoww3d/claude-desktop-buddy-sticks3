@@ -2,3 +2,5 @@
 .vscode/
 .DS_Store
 data/
+# Local agent identity files — not for upstream
+AGENTS.md

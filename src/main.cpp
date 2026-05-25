@@ -1,11 +1,16 @@
-#include <M5StickCPlus.h>
+#include "hardware.h"
 #include <LittleFS.h>
 #include <stdarg.h>
 #include "ble_bridge.h"
 #include "data.h"
 #include "buddy.h"
 
-TFT_eSprite spr = TFT_eSprite(&M5.Lcd);
+#ifdef BUDDY_DIAG_ROTATION
+void diagRotationSetup();
+void diagRotationLoop();
+#endif
+
+BuddySprite spr = BuddySprite(&buddyDisplay());
 
 // Advertise as "Claude-XXXX" (last two BT MAC bytes) so multiple sticks
 // in one room are distinguishable in the desktop picker. Name persists in
@@ -20,10 +25,9 @@ static void startBt() {
 
 #include "character.h"
 #include "stats.h"
-const int W = 135, H = 240;
+const int W = BUDDY_SCREEN_W, H = BUDDY_SCREEN_H;
 const int CX = W / 2;
 const int CY_BASE = 120;
-const int LED_PIN = 10;          // red LED, active-low
 
 // Colors used across multiple UI surfaces
 const uint16_t HOT   = 0xFA20;   // red-orange: warnings, impatience, deny
@@ -90,17 +94,17 @@ uint32_t promptArrivedMs = 0;
 // Face-down = Z-axis dominant and negative. Debounced so a toss doesn't count.
 static bool isFaceDown() {
   float ax, ay, az;
-  M5.Imu.getAccelData(&ax, &ay, &az);
+  buddyGetAccel(&ax, &ay, &az);
   return az < -0.7f && fabsf(ax) < 0.4f && fabsf(ay) < 0.4f;
 }
 
-static void applyBrightness() { M5.Axp.ScreenBreath(20 + brightLevel * 20); }
+static uint8_t brightnessValue() { return 20 + brightLevel * 20; }
+static void applyBrightness() { buddySetBrightness(brightnessValue()); }
 
 static void wake() {
   lastInteractMs = millis();
   if (screenOff) {
-    M5.Axp.SetLDO2(true);
-    applyBrightness();
+    buddyScreenOn(brightnessValue());
     screenOff = false;
     wakeTransitionUntil = millis() + 12000;
   }
@@ -109,7 +113,7 @@ static void wake() {
 bool     responseSent = false;
 
 static void beep(uint16_t freq, uint16_t dur) {
-  if (settings().sound) M5.Beep.tone(freq, dur);
+  if (settings().sound) buddyBeep(freq, dur);
 }
 
 static void sendCmd(const char* json) {
@@ -305,7 +309,7 @@ static void drawReset() {
 void menuConfirm() {
   switch (menuSel) {
     case 0: settingsOpen = true; menuOpen = false; settingsSel = 0; break;
-    case 1: M5.Axp.PowerOff(); break;
+    case 1: buddyPowerOff(); break;
     case 2:
     case 3:
       menuOpen = false;
@@ -349,21 +353,20 @@ static uint8_t paintedOrient = 0;
 // RTC and IMU share an I2C bus. Reading the RTC at 60fps starves the IMU
 // reads in clockUpdateOrient — orientation detection gets noisy. Cache the
 // time once per second; mood logic and drawClock both read from here.
-static RTC_TimeTypeDef _clkTm;
-static RTC_DateTypeDef _clkDt;
+static BuddyRtcTime _clkTm;
+static BuddyRtcDate _clkDt;
 uint32_t               _clkLastRead = 0;   // zeroed by data.h on time-sync
 static bool            _onUsb       = false;
 static void clockRefreshRtc() {
   if (millis() - _clkLastRead < 1000) return;
   _clkLastRead = millis();
-  _onUsb = M5.Axp.GetVBusVoltage() > 4.0f;
-  M5.Rtc.GetTime(&_clkTm);
-  M5.Rtc.GetDate(&_clkDt);
+  _onUsb = buddyVbusVoltageMv() > 4000;
+  buddyRtcGet(&_clkTm, &_clkDt);
 }
 
 static void clockUpdateOrient() {
   float ax, ay, az;
-  M5.Imu.getAccelData(&ax, &ay, &az);
+  buddyGetAccel(&ax, &ay, &az);
   uint8_t lock = settings().clockRot;
   if (lock == 1) { clockOrient = 0; return; }
   if (lock == 2) {
@@ -371,22 +374,20 @@ static void clockUpdateOrient() {
     // gravity so the cradle works either way up. Need a strong tilt
     // for the 1↔3 swap so handling jitter doesn't flip it; otherwise
     // hold whatever we last had (or 1 from boot).
-    if (clockOrient == 0) clockOrient = (ax >= 0) ? 1 : 3;
-    if      (ax >  0.5f && clockOrient != 1) clockOrient = 1;
-    else if (ax < -0.5f && clockOrient != 3) clockOrient = 3;
+    if (clockOrient == 0) clockOrient = buddyLandscapeRotation(ax, ay, az);
+    uint8_t want = buddyLandscapeRotation(ax, ay, az);
+    if (buddyIsSideways(ax, ay, az, true) && want != clockOrient) clockOrient = want;
     return;
   }
   // Dual threshold: strict to enter (must be clearly sideways), loose to
   // stay (tolerate ~65° of tilt). With one shared threshold a slight lean
   // while sitting on the long edge puts ax right at the boundary and the
   // counter ratchets down in ~half a second.
-  bool side = (clockOrient == 0)
-    ? fabsf(ax) > 0.7f && fabsf(ay) < 0.5f && fabsf(az) < 0.5f
-    : fabsf(ax) > 0.4f;
+  bool side = buddyIsSideways(ax, ay, az, clockOrient == 0);
   if (side) { if (orientFrames < 20) orientFrames++; }
   else      { if (orientFrames > -10) orientFrames--; }
   if (clockOrient == 0 && orientFrames >= 15) {
-    clockOrient = (ax > 0) ? 1 : 3;
+    clockOrient = buddyLandscapeRotation(ax, ay, az);
   } else if (clockOrient != 0 && orientFrames <= -8) {
     clockOrient = 0;
   } else if (clockOrient != 0 && side) {
@@ -394,7 +395,7 @@ static void clockUpdateOrient() {
     // `side` never drops and the exit-via-0 path can't fire. Watch for
     // ax sign disagreeing with the stored orientation.
     static int8_t swapFrames = 0;
-    uint8_t want = (ax > 0) ? 1 : 3;
+    uint8_t want = buddyLandscapeRotation(ax, ay, az);
     if (want != clockOrient) { if (++swapFrames >= 8) { clockOrient = want; swapFrames = 0; } }
     else swapFrames = 0;
   }
@@ -408,13 +409,13 @@ static const char* const MON[] = {
 };
 static const char* const DOW[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
 
-static uint8_t clockDow() { return _clkDt.WeekDay % 7; }
+static uint8_t clockDow() { return _clkDt.weekday % 7; }
 static void drawClock() {
   const Palette& p = characterPalette();
-  char hm[6]; snprintf(hm, sizeof(hm), "%02u:%02u", _clkTm.Hours, _clkTm.Minutes);
-  char ss[4]; snprintf(ss, sizeof(ss), ":%02u", _clkTm.Seconds);
-  uint8_t mi = (_clkDt.Month >= 1 && _clkDt.Month <= 12) ? _clkDt.Month - 1 : 0;
-  char dl[8]; snprintf(dl, sizeof(dl), "%s %02u", MON[mi], _clkDt.Date);
+  char hm[6]; snprintf(hm, sizeof(hm), "%02u:%02u", _clkTm.hours, _clkTm.minutes);
+  char ss[4]; snprintf(ss, sizeof(ss), ":%02u", _clkTm.seconds);
+  uint8_t mi = (_clkDt.month >= 1 && _clkDt.month <= 12) ? _clkDt.month - 1 : 0;
+  char dl[8]; snprintf(dl, sizeof(dl), "%s %02u", MON[mi], _clkDt.date);
 
   if (clockOrient == 0) {
     paintedOrient = 0;
@@ -432,23 +433,24 @@ static void drawClock() {
   // Landscape: 240×135 direct-to-LCD. Full fill only on entry; after that
   // text glyph bg cells repaint themselves and the pet box (small, ~90×50)
   // gets a fillRect each pet tick — small enough not to tear.
-  M5.Lcd.setRotation(clockOrient);
+  buddyDisplay().setRotation(clockOrient);
   static uint8_t lastSec = 0xFF;
   bool repaint = paintedOrient != clockOrient;
-  if (repaint) { M5.Lcd.fillScreen(p.bg); paintedOrient = clockOrient; lastSec = 0xFF; }
+  if (repaint) { buddyDisplay().fillScreen(p.bg); paintedOrient = clockOrient; lastSec = 0xFF; }
 
   // Seconds tick at 1Hz; redrawing 3 strings at 60fps is 180 SPI ops/sec
   // for nothing. Gate on the second changing (or full repaint).
-  if (repaint || _clkTm.Seconds != lastSec) {
-    lastSec = _clkTm.Seconds;
-    char wdl[12]; snprintf(wdl, sizeof(wdl), "%s %s %02u", DOW[clockDow()], MON[mi], _clkDt.Date);
-    char ssl[3]; snprintf(ssl, sizeof(ssl), "%02u", _clkTm.Seconds);
-    M5.Lcd.setTextDatum(MC_DATUM);
-    M5.Lcd.setTextSize(3); M5.Lcd.setTextColor(p.text, p.bg);    M5.Lcd.drawString(hm, 170, 42);
-    M5.Lcd.setTextSize(2); M5.Lcd.setTextColor(p.textDim, p.bg); M5.Lcd.drawString(ssl, 170, 72);
-                                                                  M5.Lcd.drawString(wdl, 170, 102);
-    M5.Lcd.setTextDatum(TL_DATUM);
-    M5.Lcd.setTextSize(1);
+  if (repaint || _clkTm.seconds != lastSec) {
+    lastSec = _clkTm.seconds;
+    char wdl[12]; snprintf(wdl, sizeof(wdl), "%s %s %02u", DOW[clockDow()], MON[mi], _clkDt.date);
+    char ssl[3]; snprintf(ssl, sizeof(ssl), "%02u", _clkTm.seconds);
+    int rightX = BUDDY_LANDSCAPE_W * 7 / 10;
+    buddyDisplay().setTextDatum(MC_DATUM);
+    buddyDisplay().setTextSize(3); buddyDisplay().setTextColor(p.text, p.bg);    buddyDisplay().drawString(hm, rightX, 42);
+    buddyDisplay().setTextSize(2); buddyDisplay().setTextColor(p.textDim, p.bg); buddyDisplay().drawString(ssl, rightX, 72);
+                                                                                buddyDisplay().drawString(wdl, rightX, 102);
+    buddyDisplay().setTextDatum(TL_DATUM);
+    buddyDisplay().setTextSize(1);
   }
 
   // Pet on left at 5 fps. Clear includes the overlay-particle zone above
@@ -462,18 +464,18 @@ static void drawClock() {
       // hardcode BUDDY_X_CENTER=67 / BUDDY_Y_OVERLAY=6 for particles so
       // keep portrait coords and just swap the surface — pet lands
       // upper-left of landscape, which is where we want it anyway.
-      M5.Lcd.fillRect(0, 0, 115, 90, p.bg);
-      buddyRenderTo(&M5.Lcd, activeState);
+      buddyDisplay().fillRect(0, 0, 115, 90, p.bg);
+      buddyRenderTo(&buddyDisplay(), activeState);
     } else {
       // Full-frame GIFs paint every pixel (transparent → pal.bg), so a
       // per-tick clear just adds a visible black flash between wipe and
       // last scanline. The entry fillScreen on paintedOrient change
       // already covers the surround.
       characterSetState(activeState);
-      characterRenderTo(&M5.Lcd, 57, 45);
+      characterRenderTo(&buddyDisplay(), 57, 45);
     }
   }
-  M5.Lcd.setRotation(0);
+  buddyDisplay().setRotation(0);
 }
 
 PersonaState derive(const TamaState& s) {
@@ -491,7 +493,7 @@ void triggerOneShot(PersonaState s, uint32_t durMs) {
 
 bool checkShake() {
   float ax, ay, az;
-  M5.Imu.getAccelData(&ax, &ay, &az);
+  buddyGetAccel(&ax, &ay, &az);
   float mag = sqrtf(ax*ax + ay*ay + az*az);
   float delta = fabsf(mag - accelBaseline);
   accelBaseline = accelBaseline * 0.95f + mag * 0.05f;
@@ -593,9 +595,9 @@ void drawInfo() {
   } else if (infoPage == 3) {
     _infoHeader(p, y, "DEVICE", infoPage);
 
-    int vBat_mV = (int)(M5.Axp.GetBatVoltage() * 1000);
-    int iBat_mA = (int)M5.Axp.GetBatCurrent();
-    int vBus_mV = (int)(M5.Axp.GetVBusVoltage() * 1000);
+    int vBat_mV = buddyBatteryVoltageMv();
+    int iBat_mA = buddyBatteryCurrentMa();
+    int vBus_mV = buddyVbusVoltageMv();
     int pct = (vBat_mV - 3200) / 10;   // (v-3.2)/(4.2-3.2)*100 = (v-3.2)*100 = (mv-3200)/10
     if (pct < 0) pct = 0; if (pct > 100) pct = 100;
     bool usb = vBus_mV > 4000;
@@ -627,7 +629,8 @@ void drawInfo() {
     ln("  heap     %uKB", ESP.getFreeHeap() / 1024);
     ln("  bright   %u/4", brightLevel);
     ln("  bt       %s", settings().bt ? (dataBtActive() ? "linked" : "on") : "off");
-    ln("  temp     %dC", (int)M5.Axp.GetTempInAXP192());
+    int tempC = buddyTemperatureC();
+    if (tempC) ln("  temp     %dC", tempC);
 
   } else if (infoPage == 4) {
     _infoHeader(p, y, "BLUETOOTH", infoPage);
@@ -682,8 +685,13 @@ void drawInfo() {
     spr.setTextColor(p.textDim, p.bg);
     ln("hardware");
     y += 4;
+#if defined(BUDDY_M5STICKS3)
+    ln("M5StickS3");
+    ln("ESP32-S3 + M5PM1");
+#else
     ln("M5StickC Plus");
     ln("ESP32 + AXP192");
+#endif
   }
 }
 
@@ -936,13 +944,13 @@ void drawHUD() {
 }
 
 void setup() {
-  M5.begin();
-  M5.Lcd.setRotation(0);
-  M5.Imu.Init();
-  M5.Beep.begin();
+#ifdef BUDDY_DIAG_ROTATION
+  diagRotationSetup();
+  return;
+#endif
+  buddyHardwareBegin();
   startBt();
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, HIGH);   // off
+  buddySetLed(false);
   applyBrightness();
   lastInteractMs = millis();
   statsLoad();
@@ -978,7 +986,7 @@ void setup() {
       spr.drawString("a buddy appears", W/2, H/2 + 12);
     }
     spr.setTextDatum(TL_DATUM); spr.setTextSize(1);
-    spr.pushSprite(0, 0);
+    buddyPushSprite(spr, p.bg);
     delay(1800);
   }
 
@@ -986,8 +994,12 @@ void setup() {
 }
 
 void loop() {
-  M5.update();
-  M5.Beep.update();
+#ifdef BUDDY_DIAG_ROTATION
+  diagRotationLoop();
+  return;
+#endif
+  buddyHardwareUpdate();
+  buddyBeepUpdate();
   t++;
   uint32_t now = millis();
 
@@ -1003,9 +1015,9 @@ void loop() {
 
   // LED: pulse on attention, otherwise off
   if (activeState == P_ATTENTION && settings().led) {
-    digitalWrite(LED_PIN, (now / 400) % 2 ? LOW : HIGH);
+    buddySetLed((now / 400) % 2);
   } else {
-    digitalWrite(LED_PIN, HIGH);
+    buddySetLed(false);
   }
 
   // shake → dizzy + force scenario advance
@@ -1053,11 +1065,11 @@ void loop() {
 
   // AXP power button (left side): short-press toggles screen off.
   // Long-press (6s) still powers off the device via AXP hardware.
-  if (M5.Axp.GetBtnPress() == 0x02) {
+  if (buddyPowerButtonPress() == 0x02) {
     if (screenOff) {
       wake();
     } else {
-      M5.Axp.SetLDO2(false);
+      buddyScreenOff();
       screenOff = true;
     }
   }
@@ -1150,7 +1162,7 @@ void loop() {
   bool clocking = displayMode == DISP_NORMAL
                && !menuOpen && !settingsOpen && !resetOpen && !inPrompt
                && tama.sessionsRunning == 0 && tama.sessionsWaiting == 0
-               && dataRtcValid() && _onUsb;
+               && _onUsb;
   if (clocking) clockUpdateOrient();
   else { clockOrient = 0; orientFrames = 0; paintedOrient = 0; }
   bool landscapeClock = clocking && clockOrient != 0;
@@ -1170,7 +1182,7 @@ void loop() {
     bool weekend = (dow == 0 || dow == 6);
     bool friday  = (dow == 5);
 
-    uint8_t h = _clkTm.Hours;
+    uint8_t h = _clkTm.hours;
     if (h >= 1 && h < 7)             activeState = P_SLEEP;
     else if (weekend)                activeState = (now/8000 % 6 == 0) ? P_HEART : P_SLEEP;
     else if (h < 9)                  activeState = (now/6000 % 4 == 0) ? P_IDLE  : P_SLEEP;
@@ -1226,7 +1238,7 @@ void loop() {
     if (resetOpen) drawReset();
     else if (settingsOpen) drawSettings();
     else if (menuOpen) drawMenu();
-    spr.pushSprite(0, 0);
+    buddyPushSprite(spr, characterPalette().bg);
   }
 
   // Face-down nap: dim immediately, pause animations, accumulate sleep time.
@@ -1243,7 +1255,7 @@ void loop() {
   if (!napping && faceDownFrames >= 15) {
     napping = true;
     napStartMs = now;
-    M5.Axp.ScreenBreath(8);
+    buddySetBrightness(8);
     dimmed = true;
   } else if (napping && faceDownFrames <= -8) {
     napping = false;
@@ -1257,7 +1269,7 @@ void loop() {
   // No auto-off on USB power — clock face wants to stay visible while charging.
   if (!screenOff && !inPrompt && !_onUsb
       && millis() - lastInteractMs > SCREEN_OFF_MS) {
-    M5.Axp.SetLDO2(false);
+    buddyScreenOff();
     screenOff = true;
   }
 
