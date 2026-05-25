@@ -8,4 +8,6 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ---
 
-The GIF assets in characters/bufo/ are from the community "bufo" emoji set (https://bufo.zone). They are third-party artwork redistributed for convenience and are not covered by the MIT license above; all rights remain with their original creators. See characters/bufo/README.md.
+Example character assets are not bundled in this fork. The upstream
+repository ships a "bufo" GIF set under a separate (and underspecified)
+license; see upstream for those files and the corresponding notice.

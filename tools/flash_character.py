@@ -6,13 +6,14 @@ Faster than the BLE drop target when you're iterating on a character.
 Usage:
   python3 tools/flash_character.py <character-dir> [--env <pio-env>]
 
-Examples:
-  python3 tools/flash_character.py characters/bufo
-  python3 tools/flash_character.py characters/bufo --env m5stick-s3
+Example:
+  python3 tools/flash_character.py path/to/my-pack --env m5stick-s3
 
-If --env is omitted, uses platformio.ini's default_envs. Pass --env
-explicitly when the default env doesn't match the board you have plugged
-in (e.g. the default is m5stickc-plus but you're flashing a StickS3).
+<character-dir> is a prepared pack (manifest.json + GIFs); no example is
+bundled in this fork. If --env is omitted, uses platformio.ini's
+default_envs. Pass --env explicitly when the default env doesn't match
+the board you have plugged in (e.g. the default is m5stickc-plus but
+you're flashing a StickS3).
 """
 import argparse, json, sys, shutil, subprocess
 from pathlib import Path

@@ -2,6 +2,13 @@
 """
 Prove the Stick's serial file receiver works: stream an existing character
 back over serial, watch the acks, verify it reloads.
+
+Usage:
+  python3 tools/test_xfer.py <character-dir> [<name>]
+
+<character-dir> is the folder of GIFs + manifest.json to stream; <name>
+is the on-device character name (defaults to "test"). No bundled example
+exists in this fork — point at your own prepared pack.
 """
 import sys, json, base64, time, glob, os, serial
 
@@ -53,7 +60,9 @@ def send_file(name, path):
     print(f" — {'ok' if ok else 'FAILED'} ({a.get('n') if a else '?'} written)")
     return ok
 
-src = sys.argv[1] if len(sys.argv) > 1 else f"{os.path.dirname(__file__)}/../characters/bufo"
+if len(sys.argv) < 2:
+    sys.exit(__doc__)
+src = sys.argv[1]
 name = sys.argv[2] if len(sys.argv) > 2 else "test"
 
 print(f"installing '{name}' from {src}")
