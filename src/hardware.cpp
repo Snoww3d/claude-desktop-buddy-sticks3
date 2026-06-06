@@ -26,7 +26,10 @@ void buddyHardwareBegin() {
   cfg.internal_spk = true;
   M5.begin(cfg);
   M5.Display.setRotation(0);
-  M5.Speaker.setVolume(64);
+  // ES8311 codec + AW8737 amp on the StickS3 are quiet at the fork's default
+  // of 64/255 — chirps were barely audible. Near-max digital volume is needed
+  // for the alert/button beeps to actually carry across a desk.
+  M5.Speaker.setVolume(255);
   M5.Speaker.stop();
 #else
   M5.begin();
