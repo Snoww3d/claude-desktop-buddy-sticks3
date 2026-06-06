@@ -1013,6 +1013,26 @@ void loop() {
 
   if ((int32_t)(now - oneShotUntil) >= 0) activeState = baseState;
 
+  // Audible "needs you" alert. The StickS3 has no software-pulseable user LED
+  // (only the hardware green power LED), so this chirp IS the attention signal
+  // — sounded once when the buddy enters attention (a Notification arrived /
+  // waiting>0), then re-chirped every 20s while still waiting, so it carries
+  // when you're away from the screen. Gated on the existing sound setting.
+  static PersonaState attnPrev = P_SLEEP;
+  static uint32_t attnNextChirp = 0;
+  if (activeState == P_ATTENTION) {
+    if (attnPrev != P_ATTENTION || (int32_t)(now - attnNextChirp) >= 0) {
+      wake();
+      // 2700Hz sits near the micro-speaker's resonant peak and the ear's most
+      // sensitive band, so it reads much louder than the old 1200Hz at the
+      // same (already-maxed) digital volume. 600ms = a sustained alert tone,
+      // not a blip — meant to be noticed from across the room.
+      beep(2700, 600);
+      attnNextChirp = now + 20000;
+    }
+  }
+  attnPrev = activeState;
+
   // LED: pulse on attention, otherwise off
   if (activeState == P_ATTENTION && settings().led) {
     buddySetLed((now / 400) % 2);
